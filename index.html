@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flashy Controller</title>
+  <script src="https://cdn.ably.com/lib/ably.min-2.js"></script>
+  <style>
+    :root{--bg:#18120d;--panel:#3a2819;--line:#8b623c;--soft:#63462c;--text:#f6e7c8;--muted:#caa97d;--accent:#f0b04b;--ok:#9dbb61;--warn:#cf5d2e}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 "Courier New",monospace}
+    .shell{max-width:760px;margin:0 auto;padding:18px}
+    h1{margin:0 0 8px;font-size:30px;color:var(--accent)}
+    .panel{background:var(--panel);border:2px solid var(--line);padding:14px;margin:14px 0}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    .fields{display:grid;grid-template-columns:2fr 1fr auto;gap:10px}
+    label{display:block;color:var(--muted);font-size:12px;font-weight:bold;margin-bottom:6px;text-transform:uppercase}
+    input,textarea,button{font:inherit}
+    input,textarea{width:100%;border:2px solid var(--soft);background:#20160f;color:var(--text);padding:10px}
+    input[type=color]{height:44px;padding:2px}
+    textarea{min-height:86px;resize:vertical}
+    button{border:2px solid var(--line);background:#5a3d24;color:var(--text);padding:11px 12px;font-weight:bold;cursor:pointer}
+    button.active,button.ok{background:var(--ok);color:#20160f}
+    button.warn{background:var(--warn);color:#20160f}
+    .status{color:var(--muted);border:2px solid var(--soft);background:#20160f;padding:10px;margin-top:10px}
+    .light{display:inline-block;width:10px;height:10px;background:var(--warn);margin-right:8px;vertical-align:middle}
+    .light.on{background:var(--ok)}
+    canvas{width:100%;display:block;border:2px solid var(--line);background:#060a12;touch-action:none;image-rendering:pixelated}
+    .toolbar{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:10px}
+    @media(max-width:620px){.grid,.fields,.toolbar{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <h1>Flashy Ably Controller</h1>
+    <div class="panel">
+      <div class="fields">
+        <div><label for="ablyKey">Controller Ably Key</label><input id="ablyKey" type="password" placeholder="publish+subscribe key for this channel"></div>
+        <div><label for="ablyChannel">Channel</label><input id="ablyChannel" value="flashy-control"></div>
+        <div style="align-self:end"><button class="ok" onclick="connectAbly()">Connect</button></div>
+      </div>
+      <div id="status" class="status"><span id="bridgeLight" class="light"></span><span id="statusText">Disconnected. No Gemini key is used in this page.</span></div>
+    </div>
+
+    <div class="panel">
+      <label>Expressions</label>
+      <div class="grid">
+        <button onclick="sendState(0)">Idle</button>
+        <button onclick="sendState(1)">Listening</button>
+        <button onclick="sendState(2)">Speaking</button>
+        <button onclick="sendState(3)">Dancing</button>
+        <button onclick="sendState(4)">Laughing</button>
+        <button onclick="sendState(8)">Sad</button>
+        <button onclick="sendState(6)">Special</button>
+        <button class="ok" onclick="toggleCanvas()">Canvas</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="grid">
+        <div><label for="displayBg">Display Orange</label><input id="displayBg" type="color" value="#ff5f1f" onchange="send({type:'displayBg',bg:this.value})"></div>
+        <div><label for="brightness">Brightness</label><input id="brightness" type="range" min="0" max="255" value="40" onchange="send({type:'brightness',brightness:Number(this.value)})"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="toolbar">
+        <button id="toolBtn" onclick="toggleTool()">Pen</button>
+        <button class="warn" onclick="clearCanvas()">Clear</button>
+        <input id="penCol" type="color" value="#9fddff">
+        <input id="bgCol" type="color" value="#060a12" onchange="clearCanvas()">
+      </div>
+      <canvas id="canvas" width="480" height="320"></canvas>
+    </div>
+
+    <div class="panel">
+      <label for="ttsText">TTS</label>
+      <textarea id="ttsText" placeholder="Type what Flashy should say from your friend's computer..."></textarea>
+      <button class="ok" style="margin-top:10px" onclick="speak()">Speak</button>
+    </div>
+  </div>
+
+  <script>
+    let ably=null, channel=null, source='controller-'+Math.random().toString(36).slice(2), lastStatusAt=0;
+    let canvasOpen=true, eraser=false, drawing=false, points=[], lastX=0, lastY=0;
+    const statusEl=document.getElementById('status');
+    const canvas=document.getElementById('canvas');
+    const ctx=canvas.getContext('2d');
+
+    function setStatus(text){document.getElementById('statusText').textContent=text}
+    function setBridgeOnline(online){
+      document.getElementById('bridgeLight').classList.toggle('on',!!online);
+    }
+    function bg(){return document.getElementById('bgCol').value}
+    function pen(){return eraser?bg():document.getElementById('penCol').value}
+    function size(){return eraser?14:6}
+    function fill(color){ctx.fillStyle=color;ctx.fillRect(0,0,canvas.width,canvas.height)}
+    function drawSegment(x1,y1,x2,y2,color,width){
+      ctx.strokeStyle=color;ctx.lineWidth=width;ctx.lineCap='round';ctx.lineJoin='round';
+      ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();
+      ctx.fillStyle=color;ctx.beginPath();ctx.arc(x2,y2,width/2,0,Math.PI*2);ctx.fill();
+    }
+    function point(ev){const r=canvas.getBoundingClientRect();const s=ev.touches?ev.touches[0]:ev;return{x:Math.round((s.clientX-r.left)*(canvas.width/r.width)),y:Math.round((s.clientY-r.top)*(canvas.height/r.height))}}
+
+    async function connectAbly(){
+      const key=document.getElementById('ablyKey').value.trim();
+      const channelName=document.getElementById('ablyChannel').value.trim()||'flashy-control';
+      if(!key){setStatus('Enter an Ably controller key.');return}
+      try{
+        setStatus('Connecting...');
+        ably=new Ably.Realtime({key,clientId:source});
+        await ably.connection.once('connected');
+        channel=ably.channels.get(channelName);
+        await channel.subscribe('flashy-command',msg=>receive(msg.data||{}));
+        await channel.subscribe('flashy-status',msg=>receiveStatus(msg.data||{}));
+        try{
+          await channel.presence.subscribe(member=>setBridgeOnline(member.clientId==='flashy-friend-app'||Date.now()-lastStatusAt<5000));
+          await channel.presence.enter({role:'controller'});
+          const members=await channel.presence.get();
+          setBridgeOnline(members.some(member=>member.clientId==='flashy-friend-app'));
+        }catch(err){}
+        setStatus('Connected to Ably. Commands are realtime.');
+      }catch(err){
+        channel=null;ably=null;setStatus('Ably connection failed.');
+      }
+    }
+    async function send(data){
+      if(!channel){setStatus('Connect Ably first.');return false}
+      await channel.publish('flashy-command',Object.assign({source,ts:Date.now()},data));
+      return true;
+    }
+    function receive(data){
+      if(!data||data.source===source)return;
+      if(data.type==='clear')fill(data.bg||bg());
+      if(data.type==='stroke'&&data.pts){
+        const pts=String(data.pts).split(';').map(p=>p.split(',').map(Number)).filter(p=>p.length===2&&!p.some(Number.isNaN));
+        for(let i=1;i<pts.length;i++)drawSegment(pts[i-1][0],pts[i-1][1],pts[i][0],pts[i][1],'#'+String(data.color||'9fddff').replace('#',''),Number(data.size||6));
+      }
+    }
+    function receiveStatus(data){
+      if(!data)return;
+      lastStatusAt=Date.now();
+      setBridgeOnline(!!data.boardReady);
+      const board=data.boardReady?'board online':'board offline';
+      const mode=typeof data.view==='number'?` mode ${data.view}`:'';
+      setStatus(`Ably connected, ${board}${mode}.`);
+      if(typeof data.brightness!=='undefined')document.getElementById('brightness').value=Number(data.brightness);
+      if(data.displayBg)document.getElementById('displayBg').value=data.displayBg;
+    }
+    function sendState(state){send({type:'state',state})}
+    function toggleCanvas(){canvasOpen=!canvasOpen;send({type:'canvas',on:canvasOpen})}
+    function toggleTool(){eraser=!eraser;document.getElementById('toolBtn').textContent=eraser?'Eraser':'Pen';send({type:'tool',eraser})}
+    function clearCanvas(){const color=bg();fill(color);send({type:'clear',bg:color})}
+    function speak(){const text=document.getElementById('ttsText').value.trim();if(text){send({type:'tts',text});document.getElementById('ttsText').value=''}}
+    function start(ev){ev.preventDefault();drawing=true;points=[];const p=point(ev);lastX=p.x;lastY=p.y;points.push(p);drawSegment(p.x,p.y,p.x,p.y,pen(),size())}
+    function move(ev){if(!drawing)return;ev.preventDefault();const p=point(ev);drawSegment(lastX,lastY,p.x,p.y,pen(),size());lastX=p.x;lastY=p.y;points.push(p)}
+    function end(){if(!drawing)return;drawing=false;if(points.length){const color=pen().replace('#','');send({type:'stroke',color,size:size(),pts:points.map(p=>`${p.x},${p.y}`).join(';')})}}
+    canvas.addEventListener('mousedown',start);canvas.addEventListener('mousemove',move);canvas.addEventListener('mouseup',end);canvas.addEventListener('mouseleave',end);
+    canvas.addEventListener('touchstart',start,{passive:false});canvas.addEventListener('touchmove',move,{passive:false});canvas.addEventListener('touchend',end);
+    fill(bg());
+    setInterval(()=>{if(lastStatusAt&&Date.now()-lastStatusAt>7000)setBridgeOnline(false)},1000);
+  </script>
+</body>
+</html>
